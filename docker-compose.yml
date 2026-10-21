@@ -12,7 +12,7 @@ services:
       context: .
       dockerfile: Dockerfile
 
-    image: udaan-asr
+    image: udaan-asr:v8     # name:tag of the built image
     container_name: udaan-asr
 
     ports:
