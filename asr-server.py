@@ -299,13 +299,18 @@ nemotron_dtype = None
 nemotron_lock = threading.Lock()
 
 
-def _nemotron_turns(waveform: np.ndarray) -> list:
+def _nemotron_turns(waveform: np.ndarray):
     """
     Diarize a 16 kHz mono float32 waveform with Nemotron-3-Diarization.
 
-    Returns (start, end, raw_speaker_label) tuples sorted by start, the same
-    shape _diarization_to_turns gives for pyannote. Speakers are numbered by
-    first arrival; overlapping speech gives overlapping turns.
+    Returns (turns, frame_probs):
+      turns       — (start, end, raw_speaker_label) tuples sorted by start, the
+                    same shape _diarization_to_turns gives for pyannote.
+                    Speakers are numbered by first arrival; overlapping speech
+                    gives overlapping turns.
+      frame_probs — float32 array (frames, 8): each speaker channel's
+                    probability for every NEMOTRON_FRAME_SEC (10 ms) frame,
+                    used to assign Whisper words (_speakers_from_frame_probs).
     """
     import torch  # type: ignore
 
@@ -329,10 +334,71 @@ def _nemotron_turns(waveform: np.ndarray) -> list:
     if error:
         raise RuntimeError(error)
     segments = nemotron_processor.extract_speaker_dict(logits, attention_mask)[0]
-    return sorted(
+    turns = sorted(
         ((float(seg["Start"]), float(seg["End"]), "NEMOTRON_%d" % int(seg["Speaker"])) for seg in segments),
         key=lambda turn: turn[0],
     )
+    frame_probs = logits[0].sigmoid().numpy().astype(np.float32, copy=False)
+    if attention_mask is not None:
+        frame_probs = frame_probs[: int(attention_mask[0].sum())]
+    return turns, frame_probs
+
+
+# Word-to-speaker assignment from the frame probabilities (Nemotron path only).
+NEMOTRON_FRAME_SEC = 0.01        # one probability row per 10 ms of audio
+NEMOTRON_ACTIVE_PROB = 0.5       # extract_speaker_dict's default threshold
+NEMOTRON_WORD_MIN_SCORE = 0.05   # below this the model hears nobody in the word
+NEMOTRON_WORD_KEEP_MARGIN = 0.1  # keep the previous word's speaker unless another is clearly ahead
+NEMOTRON_WORD_KEEP_RATIO = 0.5   # ...and only while it scores at least half the best (it is really there)
+
+
+def _speakers_from_frame_probs(words: list, frame_probs: np.ndarray, fallback: Callable) -> list:
+    """
+    Pick each word's raw speaker label ("NEMOTRON_<n>") from Nemotron's
+    per-frame probabilities: the speaker with the highest mean probability over
+    the word's own frames. This keeps the model's confidence instead of the
+    0.5-thresholded turns, so words near a speaker change or in a short gap go
+    to the right person more often.
+
+    - Candidates are only the channels that cross NEMOTRON_ACTIVE_PROB
+      somewhere, i.e. the speakers that have turns, so the set of speakers is
+      the same as with turn-based alignment.
+    - A word whose best score is below NEMOTRON_WORD_MIN_SCORE (a Whisper
+      timing slip into silence) uses fallback(start, end), the turn rule.
+    - If the previous word's speaker is still audible in this word (at least
+      NEMOTRON_WORD_MIN_SCORE and NEMOTRON_WORD_KEEP_RATIO of the best) and
+      within NEMOTRON_WORD_KEEP_MARGIN of the best, it is kept, so single
+      words don't flip speaker inside overlapping speech. A previous speaker
+      who is silent in the word is never kept.
+    """
+    n_frames = frame_probs.shape[0]
+    candidates = [int(c) for c in np.flatnonzero((frame_probs > NEMOTRON_ACTIVE_PROB).any(axis=0))] if n_frames else []
+    if not candidates:
+        return [fallback(w["start"], w["end"]) for w in words]
+    position = {"NEMOTRON_%d" % c: j for j, c in enumerate(candidates)}
+    cand_probs = frame_probs[:, candidates]
+
+    out = []
+    prev = None  # index into candidates of the previous word's speaker
+    for w in words:
+        i0 = min(max(int(round(w["start"] / NEMOTRON_FRAME_SEC)), 0), n_frames - 1)
+        i1 = min(max(int(np.ceil(w["end"] / NEMOTRON_FRAME_SEC)), i0 + 1), n_frames)
+        scores = cand_probs[i0:i1].mean(axis=0)
+        best = int(scores.argmax())
+        if scores[best] < NEMOTRON_WORD_MIN_SCORE:
+            label = fallback(w["start"], w["end"])
+            prev = position.get(label)
+            out.append(label)
+            continue
+        if (
+            prev is not None
+            and scores[prev] >= max(NEMOTRON_WORD_MIN_SCORE, NEMOTRON_WORD_KEEP_RATIO * scores[best])
+            and scores[best] - scores[prev] < NEMOTRON_WORD_KEEP_MARGIN
+        ):
+            best = prev
+        prev = best
+        out.append("NEMOTRON_%d" % candidates[best])
+    return out
 
 
 if DIARIZATION_ENABLED:
@@ -423,9 +489,11 @@ def _run_diarization(
     """
     Diarize one request with the backend _pick_diarizer chooses.
 
-    Returns (turns, backend, hints): turns as (start, end, raw_speaker_label)
-    in chronological order, backend "nemotron" or "pyannote", and the hints
-    text for the summary log line. Never falls back to the other backend.
+    Returns (turns, backend, hints, frame_probs): turns as (start, end,
+    raw_speaker_label) in chronological order, backend "nemotron" or
+    "pyannote", the hints text for the summary log line, and Nemotron's
+    per-frame speaker probabilities (None for pyannote). Never falls back to
+    the other backend.
     """
     # Optional speaker-count hints from the client. pyannote constrains its
     # auto-detected speaker count to this range, which materially improves
@@ -446,7 +514,8 @@ def _run_diarization(
     if backend == "nemotron":
         if waveform is None:
             raise RuntimeError("Could not decode the audio for NVIDIA diarization.")
-        return _nemotron_turns(waveform), backend, (hints + " (ignored)" if dia_kwargs else hints)
+        turns, frame_probs = _nemotron_turns(waveform)
+        return turns, backend, (hints + " (ignored)" if dia_kwargs else hints), frame_probs
 
     if waveform is not None:
         try:
@@ -462,7 +531,7 @@ def _run_diarization(
     else:
         diarization = diarization_pipeline(file_path, **dia_kwargs)
     # Handles both pyannote 3.x (Annotation) and 4.x (DiarizeOutput wrapper)
-    return _diarization_to_turns(diarization), backend, hints
+    return _diarization_to_turns(diarization), backend, hints, None
 
 
 # ─── Shared Model Wrapper for Streaming ─────────────────────────────────────
@@ -746,7 +815,8 @@ def _diarize_and_transcribe_sync(
 ) -> dict:
     """
     Run speaker diarization (Nemotron or pyannote, see _pick_diarizer) and
-    whisper transcription, then align each whisper word to the speaker with
+    whisper transcription, then give each whisper word a speaker: from
+    Nemotron's per-frame speaker probabilities, or for pyannote the turn with
     the largest time overlap.
 
     Segments from the same speaker adjacent in time are merged so that the
@@ -765,7 +835,7 @@ def _diarize_and_transcribe_sync(
     # _pick_diarizer). turns: list of (start, end, raw_speaker_label) in
     # chronological order.
     t_dia = time.time()
-    turns, diarizer, hints = _run_diarization(waveform, file_path, min_speakers, max_speakers)
+    turns, diarizer, hints, frame_probs = _run_diarization(waveform, file_path, min_speakers, max_speakers)
     dia_elapsed = time.time() - t_dia
 
     # ── 2. Transcribe ──
@@ -824,10 +894,13 @@ def _diarize_and_transcribe_sync(
             })
     asr_elapsed = time.time() - t_asr
 
-    # ── 3. Word-level alignment to speaker turns ──
-    # Tag every word with the diarization turn it overlaps most, then group
+    # ── 3. Word-level alignment to speakers ──
+    # Tag every word with a speaker (Nemotron: from its per-frame speaker
+    # probabilities; pyannote: the turn it overlaps most), then group
     # consecutive same-speaker words into lines. This cleanly splits a
     # whisper segment when a speaker change happens mid-segment.
+    # _best_speaker is the turn rule (also Nemotron's fallback for words in
+    # which the model hears nobody).
     def _best_speaker(s_start: float, s_end: float) -> Optional[str]:
         best_spk, best_overlap = None, 0.0
         for t_start, t_end, spk in turns:
@@ -858,10 +931,14 @@ def _diarize_and_transcribe_sync(
         return label_map[raw]
 
     # ── 5. Tag each word, then group consecutive same-speaker words into lines ──
+    # Nemotron: from its per-frame speaker probabilities; pyannote: by turn overlap.
+    if frame_probs is not None:
+        raw_speakers = _speakers_from_frame_probs(all_words, frame_probs, _best_speaker)
+    else:
+        raw_speakers = [_best_speaker(w["start"], w["end"]) for w in all_words]
     tagged_words = []
-    for w in all_words:
-        spk = _friendly(_best_speaker(w["start"], w["end"]))
-        tagged_words.append((spk, w["start"], w["end"], w["text"]))
+    for w, raw in zip(all_words, raw_speakers):
+        tagged_words.append((_friendly(raw), w["start"], w["end"], w["text"]))
 
     lines = []   # list of {speaker, start, end, text}
     for spk, w_start, w_end, w_text in tagged_words:
@@ -1169,7 +1246,7 @@ def _diarize_and_transcribe_sync_streaming(
     # chronological order.
     emit({"phase": "diarizing"})
     t_dia = time.time()
-    turns, diarizer, hints = _run_diarization(waveform, file_path, min_speakers, max_speakers)
+    turns, diarizer, hints, frame_probs = _run_diarization(waveform, file_path, min_speakers, max_speakers)
     dia_elapsed = time.time() - t_dia
     emit({
         "phase": "diarized",
@@ -1268,12 +1345,14 @@ def _diarize_and_transcribe_sync_streaming(
 
     asr_elapsed = time.time() - t_asr
 
-    # ── 3. Word-level alignment to speaker turns ──
+    # ── 3. Word-level alignment to speakers ──
     # Previously we tagged whole whisper segments with a single speaker, which
     # collapsed two-speaker exchanges within one segment to a single label.
-    # Now we tag each *word* with its best-overlap speaker, then group
+    # Now we tag each *word* with a speaker (Nemotron: from its per-frame
+    # speaker probabilities; pyannote: its best-overlap turn), then group
     # consecutive same-speaker words into lines so a speaker change inside a
-    # segment cleanly splits into two lines.
+    # segment cleanly splits into two lines. _best_speaker is the turn rule
+    # (also Nemotron's fallback for words in which the model hears nobody).
     emit({"phase": "aligning"})
 
     def _best_speaker(s_start: float, s_end: float) -> Optional[str]:
@@ -1305,11 +1384,15 @@ def _diarize_and_transcribe_sync_streaming(
             label_map[raw] = "Speaker_%d" % (len(label_map) + 1)
         return label_map[raw]
 
-    # Tag every word with its best-overlap speaker
+    # Tag every word: Nemotron from its per-frame speaker probabilities,
+    # pyannote with its best-overlap speaker.
+    if frame_probs is not None:
+        raw_speakers = _speakers_from_frame_probs(all_words, frame_probs, _best_speaker)
+    else:
+        raw_speakers = [_best_speaker(w["start"], w["end"]) for w in all_words]
     tagged_words = []
-    for w in all_words:
-        spk = _friendly(_best_speaker(w["start"], w["end"]))
-        tagged_words.append((spk, w["start"], w["end"], w["text"]))
+    for w, raw in zip(all_words, raw_speakers):
+        tagged_words.append((_friendly(raw), w["start"], w["end"], w["text"]))
 
     # Group consecutive same-speaker words into lines. Lines now break on
     # speaker change rather than on whisper-segment boundaries.

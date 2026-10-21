@@ -38,6 +38,14 @@ Every command below runs from this folder.
 - NVIDIA's model has no speaker-count setting. Min/max speakers are still
   accepted from the extension. They pick the diarizer, and pyannote still
   uses them, but they are not passed to the NVIDIA model.
+- With the NVIDIA model, each transcribed word goes to the speaker the model
+  rates most likely during that word's own audio. The model gives a 0–1
+  score per speaker every 10 ms. This places words at speaker changes better
+  than matching words to cut-off speaker segments, which pyannote still uses.
+  - If the model hears nobody during a word, the segment rule decides.
+  - A word stays with the previous speaker only while that speaker is still
+    clearly audible in it and nearly as likely as the best. This stops single
+    words from flipping speaker in overlapping speech.
 - The NVIDIA model runs in **float32** by default. NVIDIA lists Ampere and
   newer GPUs; float32 also works on Turing (T4, RTX 20xx) and costs little for
   a 100M-parameter model.
