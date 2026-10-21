@@ -15,6 +15,12 @@ services:
     image: udaan-asr:v8     # name:tag of the built image
     container_name: udaan-asr
 
+    # Overrides the Dockerfile defaults; `docker compose up -d` applies a
+    # change without a rebuild. NUM_WORKERS = transcriptions the Whisper model
+    # runs at the same time (more workers need more GPU memory).
+    environment:
+      - NUM_WORKERS=2
+
     ports:
       - "8000:8000"
 
