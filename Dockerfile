@@ -24,8 +24,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # ffmpeg turns webm/opus/m4a uploads into 16 kHz WAV; libsndfile backs soundfile.
+# libpython3.10 is needed by torchcodec's FFmpeg 4 build, which pyannote uses
+# to decode audio files (without it: "Could not load libtorchcodec").
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-pip ffmpeg libsndfile1 curl ca-certificates \
+        python3 python3-pip libpython3.10 ffmpeg libsndfile1 curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m pip install --upgrade pip
@@ -57,10 +59,13 @@ RUN curl -fsSL -o /app/whisper_online.py \
 COPY asr-server.py /app/asr-server.py
 
 # Offline at runtime: nothing is downloaded; every model loads from /app/models.
+# NUM_WORKERS and BEAM_SIZE match the earlier production image.
 ENV HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
     PYANNOTE_METRICS_ENABLED=0 \
     WHISPER_MODEL_PATH=/app/models/faster-whisper-large-v3 \
+    NUM_WORKERS=1 \
+    BEAM_SIZE=5 \
     DIARIZATION_ENABLED=1 \
     PYANNOTE_MODEL_PATH=/app/models/speaker-diarization-community-1/config.yaml \
     NEMOTRON_DIAR_MODEL_PATH=/app/models/Nemotron-3-Diarization \

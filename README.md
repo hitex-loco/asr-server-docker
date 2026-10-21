@@ -188,7 +188,7 @@ All of them have working defaults in the image.
 | `WHISPER_MODEL_PATH` | `/app/models/faster-whisper-large-v3` | faster-whisper model folder |
 | `DEVICE` | `cuda` | `cuda`, `cpu` or `auto`; also used by both diarizers |
 | `COMPUTE_TYPE` | `float16` | faster-whisper precision |
-| `BEAM_SIZE` / `BATCH_SIZE` / `NUM_WORKERS` | `4` / `8` / `2` | faster-whisper tuning |
+| `BEAM_SIZE` / `BATCH_SIZE` / `NUM_WORKERS` | `5` / `8` / `1` | faster-whisper tuning (beam and workers match the earlier production image) |
 | `DIARIZATION_ENABLED` | `1` | `0` turns both diarizers off (diarize endpoints then return 503) |
 | `PYANNOTE_MODEL_PATH` | `/app/models/speaker-diarization-community-1/config.yaml` | pyannote pipeline `config.yaml` |
 | `HF_TOKEN` | not set | only used when `PYANNOTE_MODEL_PATH` is empty, and needs `HF_HUB_OFFLINE=0` |
