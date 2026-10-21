@@ -1,0 +1,25 @@
+# UDAAN ASR server. From this folder:
+#   docker compose up --build -d
+#
+# ASR_MODELS_DIR is the host folder that holds the three model folders
+# (see README.md). It defaults to ./models next to this file:
+#   ASR_MODELS_DIR=/data/asr-models docker compose up --build -d
+services:
+  asr:
+    build:
+      # This folder is the build context; .dockerignore keeps it to
+      # asr-server.py and requirements.txt (never models/).
+      context: .
+      dockerfile: Dockerfile
+
+    image: udaan-asr
+    container_name: udaan-asr
+
+    ports:
+      - "8000:8000"
+
+    volumes:
+      - ${ASR_MODELS_DIR:-./models}:/app/models:ro
+
+    gpus: all
+    restart: unless-stopped

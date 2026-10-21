@@ -1,0 +1,31 @@
+# Python dependencies of asr-server.py, pinned. Resolved together for
+# Linux x86_64 + Python 3.10 (the Ubuntu 22.04 base of the Dockerfile).
+#
+# torch and torchaudio are NOT listed here. The Dockerfile installs them first
+# from the CUDA 12.6 wheel index, so nothing below can swap in another torch:
+#     pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu126
+
+# Speech recognition: faster-whisper large-v3 (CTranslate2, CUDA 12 + cuDNN 9)
+faster-whisper==1.2.1
+ctranslate2==4.6.2
+
+# Diarization for up to 8 speakers: NVIDIA Nemotron-3-Diarization.
+# transformers runs it natively from 5.18 onwards.
+transformers==5.20.2
+# Kept on 1.x on purpose: pyannote.audio 4.0.7 predates huggingface-hub 2.0.
+huggingface_hub==1.33.0
+
+# Diarization above 8 speakers: pyannote speaker-diarization-community-1
+pyannote.audio==4.0.7
+# Must match torch 2.8.
+torchcodec==0.7.0
+
+# Web server
+fastapi==0.156.4
+uvicorn[standard]==0.54.0
+python-multipart==0.0.32
+
+# Audio decoding (whisper_online.py needs librosa and soundfile too)
+librosa==0.11.0
+soundfile==0.14.0
+numpy==2.2.6

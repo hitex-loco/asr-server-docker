@@ -1,0 +1,5 @@
+# The build context is this folder. Send only the two files the Dockerfile
+# copies, so a models/ folder here (several GB) never goes to the builder.
+*
+!asr-server.py
+!requirements.txt
